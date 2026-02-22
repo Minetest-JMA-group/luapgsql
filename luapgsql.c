@@ -49,6 +49,25 @@
 
 #include "luapgsql.h"
 
+#if LUA_VERSION_NUM == 501
+#define lua_getuservalue(L, i) lua_getfenv((L), (i))
+#define lua_setuservalue(L, i) lua_setfenv((L), (i))
+
+static int
+lua_isinteger(lua_State *L, int idx)
+{
+	lua_Number n;
+	lua_Integer i;
+
+	if (!lua_isnumber(L, idx))
+		return 0;
+
+	n = lua_tonumber(L, idx);
+	i = lua_tointeger(L, idx);
+	return ((lua_Number)i == n);
+}
+#endif
+
 /*
  * Garbage collected memory
  */
@@ -1096,6 +1115,7 @@ conn_setErrorVerbosity(lua_State *L)
 static int
 closef_untrace(lua_State *L)
 {
+#if LUA_VERSION_NUM >= 502
 	PGconn *conn;
 	lua_CFunction cf;
 
@@ -1124,15 +1144,23 @@ closef_untrace(lua_State *L)
 
 	/* call original close function */
 	return (*cf)(L);
+#else
+	return luaL_error(L, "not supported on this Lua version");
+#endif
 }
 
 static int
 conn_trace(lua_State *L)
 {
 	PGconn *conn;
+#if LUA_VERSION_NUM >= 502
 	luaL_Stream *stream;
+#else
+	FILE **stream;
+#endif
 
 	conn = pgsql_conn(L, 1);
+#if LUA_VERSION_NUM >= 502
 	stream = luaL_checkudata(L, 2, LUA_FILEHANDLE);
 	luaL_argcheck(L, stream->f != NULL, 2, "invalid file handle");
 
@@ -1159,6 +1187,21 @@ conn_trace(lua_State *L)
 	stream->closef = closef_untrace;
 
 	PQtrace(conn, stream->f);
+#else
+	stream = luaL_checkudata(L, 2, LUA_FILEHANDLE);
+	luaL_argcheck(L, stream != NULL && *stream != NULL, 2,
+	    "invalid file handle");
+
+	/*
+	 * Keep a reference to the file object in uservalue of connection
+	 * so it doesn't get garbage collected while tracing.
+	 */
+	lua_getuservalue(L, 1);
+	lua_pushvalue(L, 2);
+	lua_setfield(L, -2, "trace_file");
+
+	PQtrace(conn, *stream);
+#endif
 	return 0;
 }
 
@@ -1902,7 +1945,8 @@ tuple_copy(lua_State *L)
 				return luaL_error(L, "argument has no "
 				    "metatable");
 
-			if (lua_getfield(L, -1, "__newindex") == LUA_TNIL)
+			lua_getfield(L, -1, "__newindex");
+			if (lua_type(L, -1) == LUA_TNIL)
 				return luaL_error(L, "metatable has no "
 				    "__newindex metamethod");
 			lua_pop(L, 2);
